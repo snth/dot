@@ -22,6 +22,24 @@ if [ -z "$DOT_DIR" ]; then
 	DOT_DIR="$HOME/.config/dotfiles"
 fi
 
+# Verbosity level
+VERBOSITY=0
+
+# Function to check if verbosity level is met
+meets_verbosity() {
+	local required_level=$1
+	[[ $VERBOSITY -ge $required_level ]]
+}
+
+# Function to print based on verbosity level
+vecho() {
+	local level=$1
+	shift
+	if meets_verbosity "$level"; then
+		echo "$@"
+	fi
+}
+
 ensure_git_repo() {
 	if [[ ! -d "$DOT_DIR/.git" ]]; then
 		error "dotfiles repository not initialized. Run 'dot init' first."
@@ -76,31 +94,25 @@ get_tracked_files() {
 
 # Sync files before entering dotfiles directory
 _enter() {
-	echo "Syncing files to dotfiles directory..."
-
-	# Create temporary file to track modifications
-	touch "$MODIFIED_FILES_LIST"
-
-	# Debug output
-	echo "Checking for files to sync..."
+	vecho 1 "Syncing files to dotfiles directory..."
 
 	# Get list of tracked files and process them
 	local file_list
 	file_list=$(get_tracked_files)
 
 	if [[ -z "$file_list" ]]; then
-		echo "No tracked files found"
+		vecho 2 "No tracked files found"
 		_enter_raw
 		return
 	fi
 
 	echo "$file_list" | while read -r src_file; do
 		# Debug output
-		echo "Processing: $src_file"
+		vecho 2 "Processing: $src_file"
 
 		# Skip if source doesn't exist
 		[[ ! -f "$src_file" ]] && {
-			echo "Skipping non-existent file: $src_file"
+			vecho 2 "Skipping non-existent file: $src_file"
 			continue
 		}
 
@@ -109,19 +121,19 @@ _enter() {
 		dot_file="$DOT_DIR/$rel_path"
 
 		# Debug output
-		echo "Relative path: $rel_path"
-		echo "Destination: $dot_file"
+		vecho 2 "Relative path: $rel_path"
+		vecho 2 "Destination: $dot_file"
 
 		# Ensure target directory exists
 		mkdir -p "$(dirname "$dot_file")"
 
 		# Copy file if it exists and is newer
 		if [[ "$src_file" -nt "$dot_file" ]]; then
-			echo "Copying newer file: $src_file -> $dot_file"
+			vecho 2 "Copying newer file: $src_file -> $dot_file"
 			cp -p "$src_file" "$dot_file" || error "Failed to copy $src_file to dotfiles"
-			echo "Updated: $rel_path"
+			vecho 1 "Updated: $rel_path"
 		else
-			echo "File up to date: $rel_path"
+			vecho 2 "File up to date: $rel_path"
 		fi
 	done
 
@@ -133,7 +145,7 @@ _enter() {
 _exit() {
 	local exit_status=$?
 
-	echo "Syncing changes back to home directory..."
+	vecho 1 "Syncing changes back to home directory..."
 
 	# Get list of modified files in git repo
 	local modified_files
@@ -145,21 +157,21 @@ _exit() {
 		dst_file="$HOME/$rel_path"
 
 		# Skip if source doesn't exist
-		[[ ! -f "$src_file" ]] && continue
+		[[ ! -f "$src_file" ]] && {
+			vecho 2 "Skipping non-existent file: $src_file"
+			continue
+		}
 
 		# Ensure target directory exists
 		mkdir -p "$(dirname "$dst_file")"
 
 		# Copy file back
 		if cp -p "$src_file" "$dst_file"; then
-			echo "Synced: $rel_path"
+			vecho 1 "Synced: $rel_path"
 		else
 			echo "Warning: Failed to sync $rel_path" >&2
 		fi
 	done
-
-	# Clean up temporary file
-	rm -f "$MODIFIED_FILES_LIST"
 
 	# Exit directory
 	_exit_raw
@@ -167,6 +179,23 @@ _exit() {
 	# Preserve original exit status
 	return $exit_status
 }
+
+# Parse verbosity options before other arguments
+while [[ $1 == -* ]]; do
+	case "$1" in
+	-v)
+		VERBOSITY=1
+		shift
+		;;
+	-vv)
+		VERBOSITY=2
+		shift
+		;;
+	*)
+		break
+		;;
+	esac
+done
 
 # Convert relative script path to absolute for alias generation
 SCRIPT_PATH=$(realpath "$0")
