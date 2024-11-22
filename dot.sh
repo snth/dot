@@ -1,33 +1,175 @@
 #!/usr/bin/env bash
 
-# Convert relative script path to absolute for alias generation
-SCRIPT_PATH=$(realpath "$0")
+show_usage() {
+	echo "Usage: dot [command] [args]"
+	echo "Commands:"
+	echo "  init          Initialize new dotfiles repository"
+	echo "  add [path]    Copy file at [path] to dotfiles"
+	echo "  rm [path]     Remove the copy of [path] from dotfiles"
+	echo "  cd            Open a shell in the dotfiles directory"
+	echo "  sync          Sync with remote and check for missing files"
+	echo "  env           Output shell configuration"
+	exit 1
+}
+
+# Show usage if no arguments provided
+if [ $# -eq 0 ]; then
+	show_usage
+fi
 
 # Default dotfiles location, can be overridden by setting DOT_DIR
 if [ -z "$DOT_DIR" ]; then
 	DOT_DIR="$HOME/.config/dotfiles"
 fi
 
-# Show usage if no arguments provided
-if [ $# -eq 0 ]; then
-	echo "Usage: dot [command] [args]"
-	echo "Commands:"
-	echo "  init          Initialize new dotfiles repository"
-	echo "  add [path]    Add a file to dotfiles"
-	echo "  rm [path]     Remove a file from dotfiles"
-	echo "  status        Show git status"
-	echo "  sync          Sync with remote and update symlinks"
-	echo "  env           Output shell configuration"
-	exit 1
+ensure_git_repo() {
+	if [[ ! -d "$DOT_DIR/.git" ]]; then
+		error "dotfiles repository not initialized. Run 'dot init' first."
+	fi
+}
+
+# Ensure we're in a git repository or handling init/env/cd for subsequent commands
+if [[ "$1" != "init" && "$1" != "env" && "$1" != "cd" ]]; then
+	ensure_git_repo
 fi
 
-# Ensure we're in a git repository or handling init/env for subsequent commands
-if [[ "$1" != "init" && "$1" != "env" ]]; then
-	if [[ ! -d "$DOT_DIR/.git" ]]; then
-		echo "Error: dotfiles repository not initialized. Run 'dot init' first."
-		exit 1
+get_paths() {
+	local file_path="$1"
+	if [[ -z "$file_path" ]]; then
+		error "Please specify a path"
 	fi
-fi
+
+	src_path=$(realpath "$file_path")
+	if [[ ! -e "$src_path" ]]; then
+		error "$file_path does not exist"
+	fi
+
+	rel_path=$(realpath --relative-to="$HOME" "$src_path")
+	target_path="$DOT_DIR/$rel_path"
+	target_dir=$(dirname "$target_path")
+}
+
+# Basic directory navigation without sync
+_enter_raw() {
+	pushd "$DOT_DIR" &>/dev/null || error "Failed to enter $DOT_DIR"
+}
+
+_exit_raw() {
+	popd &>/dev/null
+}
+
+# Function to get list of tracked files relative to home
+get_tracked_files() {
+	local files=()
+	local IFS=$'\n'
+
+	_enter_raw
+	# Collect all tracked files in an array
+	mapfile -t files < <(git ls-files)
+	_exit_raw
+
+	# Output full paths
+	for file in "${files[@]}"; do
+		echo "$HOME/$file"
+	done
+}
+
+# Sync files before entering dotfiles directory
+_enter() {
+	echo "Syncing files to dotfiles directory..."
+
+	# Create temporary file to track modifications
+	touch "$MODIFIED_FILES_LIST"
+
+	# Debug output
+	echo "Checking for files to sync..."
+
+	# Get list of tracked files and process them
+	local file_list
+	file_list=$(get_tracked_files)
+
+	if [[ -z "$file_list" ]]; then
+		echo "No tracked files found"
+		_enter_raw
+		return
+	fi
+
+	echo "$file_list" | while read -r src_file; do
+		# Debug output
+		echo "Processing: $src_file"
+
+		# Skip if source doesn't exist
+		[[ ! -f "$src_file" ]] && {
+			echo "Skipping non-existent file: $src_file"
+			continue
+		}
+
+		# Calculate paths
+		rel_path=$(realpath --relative-to="$HOME" "$src_file")
+		dot_file="$DOT_DIR/$rel_path"
+
+		# Debug output
+		echo "Relative path: $rel_path"
+		echo "Destination: $dot_file"
+
+		# Ensure target directory exists
+		mkdir -p "$(dirname "$dot_file")"
+
+		# Copy file if it exists and is newer
+		if [[ "$src_file" -nt "$dot_file" ]]; then
+			echo "Copying newer file: $src_file -> $dot_file"
+			cp -p "$src_file" "$dot_file" || error "Failed to copy $src_file to dotfiles"
+			echo "Updated: $rel_path"
+		else
+			echo "File up to date: $rel_path"
+		fi
+	done
+
+	# Enter directory after sync
+	_enter_raw
+}
+
+# Sync modified files back to original locations
+_exit() {
+	local exit_status=$?
+
+	echo "Syncing changes back to home directory..."
+
+	# Get list of modified files in git repo
+	local modified_files
+	modified_files=$(git diff --name-only)
+
+	# For each modified file, copy back to home directory
+	for rel_path in $modified_files; do
+		src_file="$DOT_DIR/$rel_path"
+		dst_file="$HOME/$rel_path"
+
+		# Skip if source doesn't exist
+		[[ ! -f "$src_file" ]] && continue
+
+		# Ensure target directory exists
+		mkdir -p "$(dirname "$dst_file")"
+
+		# Copy file back
+		if cp -p "$src_file" "$dst_file"; then
+			echo "Synced: $rel_path"
+		else
+			echo "Warning: Failed to sync $rel_path" >&2
+		fi
+	done
+
+	# Clean up temporary file
+	rm -f "$MODIFIED_FILES_LIST"
+
+	# Exit directory
+	_exit_raw
+
+	# Preserve original exit status
+	return $exit_status
+}
+
+# Convert relative script path to absolute for alias generation
+SCRIPT_PATH=$(realpath "$0")
 
 case "$1" in
 "env")
@@ -37,119 +179,89 @@ case "$1" in
 	exit 0
 	;;
 
+"cd")
+	if [[ ! -d "$DOT_DIR" ]]; then
+		error "$DOT_DIR does not exist"
+	fi
+	_enter
+	$SHELL
+	_exit
+	exit 0
+	;;
+
 "init")
 	if [[ -d "$DOT_DIR" ]]; then
-		echo "Error: $DOT_DIR already exists"
-		exit 1
+		error "$DOT_DIR already exists"
 	fi
 
 	mkdir -p "$DOT_DIR"
-	pushd "$DOT_DIR" &>/dev/null || {
-		echo "Failed to pushd to $DOT_DIR"
-		exit 1
-	}
+	_enter
 	git init
 	if [[ $? -eq 0 ]]; then
 		echo "Initialized empty dotfiles repository in $DOT_DIR"
 	fi
-	popd &>/dev/null
+	_exit
 	;;
 
 "add")
 	if [[ -z "$2" ]]; then
-		echo "Error: Please specify a path to add"
-		exit 1
+		error "Please specify a path to add"
 	fi
 
-	# Get absolute paths
-	src_path=$(realpath "$2")
-
-	if [[ ! -e "$src_path" ]]; then
-		echo "Error: $2 does not exist"
-		exit 1
-	fi
-
-	# Create relative path structure in dotfiles repo
-	rel_path=$(realpath --relative-to="$HOME" "$src_path")
-	target_path="$DOT_DIR/$rel_path"
-	target_dir=$(dirname "$target_path")
+	# Get all paths
+	get_paths "$2"
 
 	# Create directory structure if it doesn't exist
 	mkdir -p "$target_dir"
 
-	# Create symlink in dotfiles repo pointing to original file
-	ln -s "$src_path" "$target_path"
+	# Copy file to dotfiles repo
+	cp -r "$src_path" "$target_path"
 
 	# Add to git
-	pushd "$DOT_DIR" &>/dev/null || {
-		echo "Failed to pushd to $DOT_DIR"
-		exit 1
-	}
+	_enter
 	git add "$rel_path"
 	echo "Added '$rel_path' to dotfiles"
-	popd &>/dev/null
+	_exit
 	;;
 
 "rm")
 	if [[ -z "$2" ]]; then
-		echo "Error: Please specify a path to remove"
-		exit 1
+		error "Please specify a path to remove"
 	fi
 
-	# Get absolute paths
-	src_path=$(realpath "$2")
-	rel_path=$(realpath --relative-to="$HOME" "$src_path")
-	target_path="$DOT_DIR/$rel_path"
+	# Get all paths
+	get_paths "$2"
 
-	if [[ ! -L "$target_path" ]]; then
-		echo "Error: $2 is not managed by dot"
-		exit 1
+	if [[ ! -e "$target_path" ]]; then
+		error "$2 is not managed by dot"
 	fi
 
-	# Remove symlink from dotfiles repo
-	pushd "$DOT_DIR" &>/dev/null || {
-		echo "Failed to pushd to $DOT_DIR"
-		exit 1
-	}
+	# Remove file from dotfiles repo
+	_enter
 	git rm --cached "$rel_path"
-	rm "$target_path"
+	rm -r "$target_path"
 	echo "Removed '$rel_path' from dotfiles"
-	popd &>/dev/null
-	;;
-
-"status")
-	pushd "$DOT_DIR" &>/dev/null || {
-		echo "Failed to pushd to $DOT_DIR"
-		exit 1
-	}
-	git status
-	popd &>/dev/null
+	_exit
 	;;
 
 "sync")
-	pushd "$DOT_DIR" &>/dev/null || {
-		echo "Failed to pushd to $DOT_DIR"
-		exit 1
-	}
+	_enter
 	git pull
-	# Verify symlinks point to existing files
-	find "$DOT_DIR" -type l | while read -r link; do
-		rel_path="${link#$DOT_DIR/}"
-		target=$(readlink "$link")
-		if [[ ! -e "$target" ]]; then
-			echo "Warning: broken symlink for $rel_path (target: $target)"
+	# Check if source files still exist
+	find "$DOT_DIR" -type f -not -path '*/.git/*' | while read -r file; do
+		rel_path="${file#$DOT_DIR/}"
+		src_path="$HOME/$rel_path"
+		if [[ ! -e "$src_path" ]]; then
+			echo "Warning: original file missing for $rel_path"
 		fi
 	done
-	popd &>/dev/null
+	_exit
 	;;
 
 *)
 	# Pass through all other commands to git in the dotfiles directory
-	pushd "$DOT_DIR" &>/dev/null || {
-		echo "Failed to pushd to $DOT_DIR"
-		exit 1
-	}
+	_enter
 	git "$@"
-	popd &>/dev/null
+	_exit
 	;;
 esac
