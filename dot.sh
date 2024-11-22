@@ -4,11 +4,10 @@ show_usage() {
 	echo "Usage: dot [command] [args]"
 	echo "Commands:"
 	echo "  init          Initialize new dotfiles repository"
-	echo "  add [path]    Copy file at [path] to dotfiles"
-	echo "  rm [path]     Remove the copy of [path] from dotfiles"
+	echo "  track [path]  Start tracking file at [path] in dotfiles"
 	echo "  cd            Open a shell in the dotfiles directory"
-	echo "  sync          Sync with remote and check for missing files"
 	echo "  env           Output shell configuration"
+	echo "  [git-cmd]     Any git command (executed in dotfiles directory)"
 	exit 1
 }
 
@@ -36,8 +35,13 @@ vecho() {
 	local level=$1
 	shift
 	if meets_verbosity "$level"; then
-		echo "$@"
+		echo "$@" >&2
 	fi
+}
+
+error() {
+	echo "Error: $1" >&2
+	exit 1
 }
 
 ensure_git_repo() {
@@ -50,31 +54,6 @@ ensure_git_repo() {
 if [[ "$1" != "init" && "$1" != "env" && "$1" != "cd" ]]; then
 	ensure_git_repo
 fi
-
-get_paths() {
-	local file_path="$1"
-	if [[ -z "$file_path" ]]; then
-		error "Please specify a path"
-	fi
-
-	src_path=$(realpath "$file_path")
-	if [[ ! -e "$src_path" ]]; then
-		error "$file_path does not exist"
-	fi
-
-	rel_path=$(realpath --relative-to="$HOME" "$src_path")
-	target_path="$DOT_DIR/$rel_path"
-	target_dir=$(dirname "$target_path")
-}
-
-# Basic directory navigation without sync
-_enter_raw() {
-	pushd "$DOT_DIR" &>/dev/null || error "Failed to enter $DOT_DIR"
-}
-
-_exit_raw() {
-	popd &>/dev/null
-}
 
 # Function to get list of tracked files relative to home
 get_tracked_files() {
@@ -90,6 +69,15 @@ get_tracked_files() {
 	for file in "${files[@]}"; do
 		echo "$HOME/$file"
 	done
+}
+
+# Basic directory navigation without sync
+_enter_raw() {
+	pushd "$DOT_DIR" &>/dev/null || error "Failed to enter $DOT_DIR"
+}
+
+_exit_raw() {
+	popd &>/dev/null
 }
 
 # Sync files before entering dotfiles directory
@@ -180,6 +168,37 @@ _exit() {
 	return $exit_status
 }
 
+# Function to translate a path to be relative to HOME if it's a file or directory
+translate_path() {
+	local arg="$1"
+
+	vecho 2 "Translating path: $arg"
+
+	# Skip if the argument doesn't exist as a file or directory
+	if [[ ! -e "$arg" ]]; then
+		vecho 2 "Path does not exist, keeping unchanged: $arg"
+		echo "$arg"
+		return
+	fi
+
+	# Get the absolute path
+	local abs_path
+	abs_path=$(realpath "$arg")
+	vecho 2 "Absolute path: $abs_path"
+
+	# Check if the path is under HOME
+	if [[ "$abs_path" == "$HOME"/* ]]; then
+		# Get path relative to HOME
+		local rel_path
+		rel_path=$(realpath --relative-to="$HOME" "$abs_path")
+		vecho 2 "Translated to path relative to HOME: $rel_path"
+		echo "$rel_path"
+	else
+		vecho 2 "Path not under HOME, keeping unchanged: $arg"
+		echo "$arg"
+	fi
+}
+
 # Parse verbosity options before other arguments
 while [[ $1 == -* ]]; do
 	case "$1" in
@@ -232,65 +251,53 @@ case "$1" in
 	_exit
 	;;
 
-"add")
+"track")
 	if [[ -z "$2" ]]; then
-		error "Please specify a path to add"
+		error "Please specify a path to track"
 	fi
 
-	# Get all paths
-	get_paths "$2"
+	# Get translated path and store it
+	rel_path=$(translate_path "$2")
+	src_path="$(realpath "$2")"
+	target_path="$DOT_DIR/$rel_path"
+	target_dir=$(dirname "$target_path")
+
+	# Verify source exists
+	if [[ ! -f "$src_path" ]]; then
+		error "Source file does not exist: $src_path"
+	fi
+
+	vecho 2 "Source path: $src_path"
+	vecho 2 "Target path: $target_path"
 
 	# Create directory structure if it doesn't exist
 	mkdir -p "$target_dir"
 
 	# Copy file to dotfiles repo
-	cp -r "$src_path" "$target_path"
+	cp -p "$src_path" "$target_path" || error "Failed to copy file to dotfiles"
 
 	# Add to git
 	_enter
 	git add "$rel_path"
-	echo "Added '$rel_path' to dotfiles"
-	_exit
-	;;
-
-"rm")
-	if [[ -z "$2" ]]; then
-		error "Please specify a path to remove"
-	fi
-
-	# Get all paths
-	get_paths "$2"
-
-	if [[ ! -e "$target_path" ]]; then
-		error "$2 is not managed by dot"
-	fi
-
-	# Remove file from dotfiles repo
-	_enter
-	git rm --cached "$rel_path"
-	rm -r "$target_path"
-	echo "Removed '$rel_path' from dotfiles"
-	_exit
-	;;
-
-"sync")
-	_enter
-	git pull
-	# Check if source files still exist
-	find "$DOT_DIR" -type f -not -path '*/.git/*' | while read -r file; do
-		rel_path="${file#$DOT_DIR/}"
-		src_path="$HOME/$rel_path"
-		if [[ ! -e "$src_path" ]]; then
-			echo "Warning: original file missing for $rel_path"
-		fi
-	done
+	echo "Started tracking: $rel_path"
 	_exit
 	;;
 
 *)
 	# Pass through all other commands to git in the dotfiles directory
+	# but first translate any file/directory arguments
+	cmd="$1"
+	shift
+	translated_args=()
+
+	vecho 2 "Processing git command: $cmd"
+	for arg in "$@"; do
+		vecho 2 "Processing argument: $arg"
+		translated_args+=("$(translate_path "$arg")")
+	done
+
 	_enter
-	git "$@"
+	git "$cmd" "${translated_args[@]}"
 	_exit
 	;;
 esac
