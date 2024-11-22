@@ -91,15 +91,15 @@ _enter() {
 
 	# Get list of tracked files and process them
 	local file_list
-	file_list=$(get_tracked_files)
+	mapfile -t tracked_files < <(get_tracked_files)
 
-	if [[ -z "$file_list" ]]; then
+	if [[ ${#tracked_files[@]} -eq 0 ]]; then
 		vecho 2 "No tracked files found"
 		_enter_raw
 		return
 	fi
 
-	echo "$file_list" | while read -r src_file; do
+	for src_file in "${tracked_files[@]}"; do
 		# Debug output
 		vecho 2 "Processing: $src_file"
 
@@ -120,14 +120,9 @@ _enter() {
 		# Ensure target directory exists
 		mkdir -p "$(dirname "$dot_file")"
 
-		# Copy file if it exists and is newer
-		if [[ "$src_file" -nt "$dot_file" ]]; then
-			vecho 2 "Copying newer file: $src_file -> $dot_file"
-			cp -p "$src_file" "$dot_file" || error "Failed to copy $src_file to dotfiles"
-			vecho 1 "Updated: $rel_path"
-		else
-			vecho 2 "File up to date: $rel_path"
-		fi
+		# Always copy file to ensure git status is accurate
+		cp -p "$src_file" "$dot_file" || error "Failed to copy $src_file to dotfiles"
+		vecho 1 "Synced: $rel_path"
 	done
 
 	# Enter directory after sync
@@ -140,20 +135,107 @@ _exit() {
 
 	vecho 1 "Syncing changes back to home directory..."
 
-	# Get list of modified files in git repo
-	local modified_files
-	modified_files=$(git diff --name-only)
+	# Get list of all tracked files into an array
+	local file_list
+	mapfile -t tracked_files < <(get_tracked_files)
 
-	# For each modified file, copy back to home directory
-	for rel_path in $modified_files; do
+	if [[ ${#tracked_files[@]} -eq 0 ]]; then
+		vecho 2 "No tracked files found"
+		_exit_raw
+		return $exit_status
+	fi
+
+	# Process each file
+	for dst_file in "${tracked_files[@]}"; do
+		# Calculate paths
+		rel_path=$(realpath --relative-to="$HOME" "$dst_file")
 		src_file="$DOT_DIR/$rel_path"
-		dst_file="$HOME/$rel_path"
+
+		# Debug output
+		vecho 2 "Processing: $rel_path"
+		vecho 2 "Source: $src_file"
+		vecho 2 "Destination: $dst_file"
 
 		# Skip if source doesn't exist
 		[[ ! -f "$src_file" ]] && {
 			vecho 2 "Skipping non-existent file: $src_file"
 			continue
 		}
+
+		# Get file hashes for content comparison
+		src_hash=$(sha256sum "$src_file" | cut -d' ' -f1)
+
+		# If destination exists, check for conflicts
+		if [[ -f "$dst_file" ]]; then
+			dst_hash=$(sha256sum "$dst_file" | cut -d' ' -f1)
+
+			if [[ "$src_hash" != "$dst_hash" ]]; then
+				echo "Conflict detected for: $rel_path"
+				echo "Actions:"
+				echo "  [d] Show diff"
+				echo "  [k/s] Keep home directory version (skip sync)"
+				echo "  [o/u] Overwrite with dotfiles version (update)"
+				echo "  [b] Overwrite with dotfiles version (create backup)"
+				read -rp "Choose action [d/k/s/o/b]: " choice
+
+				case "${choice,,}" in # Convert to lowercase
+				d)
+					diff --color=always -u "$dst_file" "$src_file" || true
+					echo
+					echo "After viewing diff:"
+					echo "  [k/s] Keep home directory version (skip sync)"
+					echo "  [o/u] Overwrite with dotfiles version"
+					echo "  [b] Overwrite with dotfiles version (create backup)"
+					read -rp "Choose action [k/s/o/b]: " choice
+					case "${choice,,}" in
+					k | s)
+						echo "Skipping: $rel_path"
+						continue
+						;;
+					o | u)
+						# Continue to copy operation
+						;;
+					b)
+						backup_file="${dst_file}.$(date +%Y%m%d_%H%M%S).bak"
+						if cp -p "$dst_file" "$backup_file"; then
+							echo "Created backup: $backup_file"
+						else
+							echo "Error: Failed to create backup, skipping sync"
+							continue
+						fi
+						;;
+					*)
+						echo "Invalid choice, skipping: $rel_path"
+						continue
+						;;
+					esac
+					;;
+				k | s)
+					echo "Skipping: $rel_path"
+					continue
+					;;
+				o)
+					# Continue to copy operation
+					;;
+				b)
+					backup_file="${dst_file}.$(date +%Y%m%d_%H%M%S).bak"
+					if cp -p "$dst_file" "$backup_file"; then
+						echo "Created backup: $backup_file"
+					else
+						echo "Error: Failed to create backup, skipping sync"
+						continue
+					fi
+					;;
+				*)
+					echo "Invalid choice, skipping: $rel_path"
+					continue
+					;;
+				esac
+			else
+				vecho 2 "Files are identical, skipping: $rel_path"
+				continue
+			fi
+		fi
 
 		# Ensure target directory exists
 		mkdir -p "$(dirname "$dst_file")"
