@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 
 show_usage() {
-	echo "Usage: dot [command] [args]"
+	echo "Usage: dot [options] [command] [args]"
+	echo
+	echo "Options:"
+	echo "  -v           Enable verbose output"
+	echo "  -vv          Enable debug output"
+	echo
 	echo "Commands:"
 	echo "  init          Initialize new dotfiles repository"
 	echo "  track [path]  Start tracking file at [path] in dotfiles"
