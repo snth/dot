@@ -66,7 +66,41 @@ safe_copy() {
   local dst="$2"
 
   if [[ -d "$src" ]]; then
-    cp -RPp "$src" "$dst"
+    # Create the target directory
+    mkdir -p "$dst"
+
+    # Iterate through source directory contents
+    local item
+    for item in "$src"/*; do
+      [[ -e "$item" ]] || continue # Handle empty directories
+
+      # Skip .git directories
+      if [[ "$(basename "$item")" == ".git" ]]; then
+        vecho 2 "Skipping .git directory: $item"
+        continue
+      fi
+
+      # If it's a directory, recurse
+      if [[ -d "$item" ]]; then
+        safe_copy "$item" "$dst/$(basename "$item")"
+      else
+        cp -p "$item" "$dst/"
+      fi
+    done
+
+    # Also copy hidden files (except .git)
+    for item in "$src"/.*; do
+      [[ -e "$item" ]] || continue # Handle no hidden files case
+      local base
+      base=$(basename "$item")
+      if [[ "$base" != "." && "$base" != ".." && "$base" != ".git" ]]; then
+        if [[ -d "$item" ]]; then
+          safe_copy "$item" "$dst/$base"
+        else
+          cp -p "$item" "$dst/"
+        fi
+      fi
+    done
   else
     cp -p "$src" "$dst"
   fi
@@ -202,6 +236,11 @@ case "$1" in
     error "Source path does not exist: $src_path"
   fi
 
+  # Check if we're trying to track a .git directory
+  if [[ "$src_path" == */.git || "$src_path" == */.git/* ]]; then
+    error "Cannot track .git directories or files"
+  fi
+
   # Get the full relative path preserving directory structure
   rel_path=$(translate_path "$2")
   target_path="$DOT_DIR/$rel_path"
@@ -216,9 +255,9 @@ case "$1" in
 
   # Copy file or directory to dotfiles repo
   if [[ -d "$src_path" ]]; then
-    cp -RPp "$src_path" "$target_dir/" || error "Failed to copy directory to dotfiles"
+    safe_copy "$src_path" "$target_dir/$(basename "$src_path")" || error "Failed to copy directory to dotfiles"
   else
-    cp -p "$src_path" "$target_dir/" || error "Failed to copy file to dotfiles"
+    safe_copy "$src_path" "$target_dir/" || error "Failed to copy file to dotfiles"
   fi
 
   # Add to git
