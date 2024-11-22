@@ -1,0 +1,2 @@
+# dot
+Simple dotfiles manager
